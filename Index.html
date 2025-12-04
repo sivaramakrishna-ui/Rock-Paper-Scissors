@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rock Paper Scissors AI - Switch Camera</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: white;
+            text-align: center;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 { margin-top: 20px; color: #00ffcc; text-shadow: 0 0 10px rgba(0,255,204,0.5); }
+
+        /* Controls Area */
+        .controls {
+            margin: 15px 0;
+            background: #333;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        select {
+            padding: 8px;
+            border-radius: 5px;
+            border: none;
+            background: #555;
+            color: white;
+            font-size: 16px;
+            max-width: 150px; /* Limit width for mobile */
+        }
+
+        button {
+            padding: 10px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            background: #00ffcc;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            transition: transform 0.1s;
+        }
+        button:hover { transform: scale(1.05); background: #00e6b8; }
+        button:disabled { background: #555; cursor: not-allowed; color: #888; }
+
+        #switchCameraBtn {
+            padding: 10px 15px;
+            background: #ff00cc;
+            color: white;
+            display: none; /* Hidden by default */
+        }
+
+        /* Game Area */
+        #canvas-wrapper {
+            position: relative;
+            margin: 20px auto;
+            border: 4px solid #00ffcc;
+            border-radius: 10px;
+            overflow: hidden;
+            width: 224px;
+            height: 224px;
+            background: #000;
+        }
+
+        /* We hide the raw video and only show the cropped canvas */
+        #webcam-video { display: none; }
+        #prediction-canvas { width: 100%; height: 100%; object-fit: cover; }
+
+        /* UI Text */
+        #status-label { font-size: 24px; font-weight: bold; margin: 10px 0; min-height: 30px; }
+        #game-result { font-size: 28px; font-weight: bold; color: #ffeb3b; margin-top: 10px; min-height: 40px; }
+        
+        .score-board {
+            display: flex;
+            gap: 20px;
+            font-size: 20px;
+            margin-top: 20px;
+            background: #222;
+            padding: 10px 30px;
+            border-radius: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Rock Paper Scissors AI</h1>
+
+    <div class="controls">
+        <label for="cameraSelect">Camera: </label>
+        <select id="cameraSelect" disabled></select>
+        <button id="switchCameraBtn" onclick="toggleCamera()">🔄</button>
+        <button id="startBtn" onclick="init()">Start Game</button>
+    </div>
+
+    <div id="canvas-wrapper">
+        <canvas id="prediction-canvas" width="224" height="224"></canvas>
+    </div>
+
+    <!-- Hidden video element for raw stream -->
+    <video id="webcam-video" playsinline autoplay muted></video>
+
+    <div id="status-label">Waiting to start...</div>
+    <div id="game-result"></div>
+
+    <div class="score-board">
+        <span id="player-score">Player: 0</span>
+        <span id="bot-score">Bot: 0</span>
+    </div>
+
+    <!-- Import TensorFlow.js and Teachable Machine -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+    <script>
+        // --- CONFIGURATION: REPLACE THIS WITH YOUR MODEL URL ---
+        const URL = "https://teachablemachine.withgoogle.com/models/Z56Hobds2/";
+
+        let model, maxPredictions;
+        let videoElement, canvas, ctx;
+        let currentStream = null;
+        let isGameRunning = false;
+        let scores = { player: 0, bot: 0 };
+        
+        // Game State Variables
+        let gameState = "IDLE"; // IDLE, COUNTDOWN, RESULT
+        let lastMove = "Nothing";
+
+        async function init() {
+            const startBtn = document.getElementById("startBtn");
+            startBtn.innerText = "Loading...";
+            startBtn.disabled = true;
+
+            // SECURITY CHECK: Warn user if opening via file://
+            if (window.location.protocol === 'file:') {
+                alert("⚠️ CAMERA ERROR LIKELY: You are opening this file directly (file://). Browsers block camera access here. \n\nPlease run this using a local server (like VS Code 'Live Server') or upload it to a secure website (https).");
+            }
+
+            try {
+                // 1. Load the Model
+                const modelURL = URL + "model.json";
+                const metadataURL = URL + "metadata.json";
+                model = await tmImage.load(modelURL, metadataURL);
+                maxPredictions = model.getTotalClasses();
+
+                // 2. Setup DOM Elements
+                videoElement = document.getElementById("webcam-video");
+                canvas = document.getElementById("prediction-canvas");
+                ctx = canvas.getContext("2d");
+
+                // 3. Request initial camera permission
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    stream.getTracks().forEach(track => track.stop()); 
+                } catch (e) {
+                    console.log("Permission check failed", e);
+                }
+
+                // 4. Initialize Cameras
+                await getCameras();
+                
+                // 5. Start the first camera
+                const cameraSelect = document.getElementById("cameraSelect");
+                if (cameraSelect.options.length > 0) {
+                    await startCamera(cameraSelect.value);
+                } else {
+                    alert("No cameras found! Ensure permission is granted.");
+                }
+
+                // 6. Start Loop
+                requestAnimationFrame(loop);
+                
+                // 7. UI Updates
+                document.getElementById("status-label").innerText = "Make a move!";
+                startBtn.style.display = "none";
+                document.getElementById("cameraSelect").disabled = false;
+                
+                startGameLogic();
+
+            } catch (error) {
+                console.error(error);
+                alert("Error: " + error.message);
+                startBtn.innerText = "Error";
+            }
+        }
+
+        // --- CAMERA HANDLING ---
+
+        async function getCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                const select = document.getElementById("cameraSelect");
+                const switchBtn = document.getElementById("switchCameraBtn");
+                
+                select.innerHTML = ""; 
+                
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement("option");
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${index + 1}`;
+                    select.appendChild(option);
+                });
+
+                if (videoDevices.length > 1) {
+                    switchBtn.style.display = "inline-block";
+                }
+
+                select.onchange = () => {
+                    startCamera(select.value);
+                };
+            } catch (err) {
+                console.warn("Could not list cameras", err);
+            }
+        }
+
+        async function toggleCamera() {
+            const select = document.getElementById("cameraSelect");
+            if (select.options.length < 2) return; 
+
+            const nextIndex = (select.selectedIndex + 1) % select.options.length;
+            select.selectedIndex = nextIndex;
+            await startCamera(select.value);
+        }
+
+        async function startCamera(deviceId) {
+            // Stop current stream
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            // ATTEMPT 1: High quality preference
+            const constraintsDQ = {
+                video: {
+                    deviceId: { exact: deviceId },
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
+            };
+
+            try {
+                await tryGetUserMedia(constraintsDQ);
+            } catch (err) {
+                console.warn("High quality constraints failed, trying fallback...", err);
+                
+                // ATTEMPT 2: Fallback (Just get ANY video from this device)
+                // This fixes the issue on phones that don't support 640x480 exactly
+                const constraintsFallback = {
+                    video: { deviceId: { exact: deviceId } }
+                };
+
+                try {
+                    await tryGetUserMedia(constraintsFallback);
+                } catch (err2) {
+                    console.error("Camera failed:", err2);
+                    alert(`Couldn't access camera. Error: ${err2.name}. \nCheck permissions and ensure you are on HTTPS.`);
+                }
+            }
+        }
+
+        async function tryGetUserMedia(constraints) {
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            currentStream = stream;
+            videoElement.srcObject = stream;
+            
+            return new Promise((resolve) => {
+                videoElement.onloadedmetadata = () => {
+                    resolve();
+                };
+            });
+        }
+
+        // --- MAIN LOOP ---
+
+        async function loop() {
+            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+                const videoSize = Math.min(videoElement.videoWidth, videoElement.videoHeight);
+                const startX = (videoElement.videoWidth - videoSize) / 2;
+                const startY = (videoElement.videoHeight - videoSize) / 2;
+
+                ctx.save();
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1); 
+                ctx.drawImage(
+                    videoElement,
+                    startX, startY, videoSize, videoSize, 
+                    0, 0, canvas.width, canvas.height
+                );
+                ctx.restore();
+
+                await predict();
+            }
+            requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            if (!model) return;
+            const prediction = await model.predict(canvas);
+            
+            let highestProb = 0;
+            let bestClass = "";
+
+            for (let i = 0; i < maxPredictions; i++) {
+                if (prediction[i].probability > highestProb) {
+                    highestProb = prediction[i].probability;
+                    bestClass = prediction[i].className;
+                }
+            }
+
+            if (gameState === "IDLE") {
+                document.getElementById("status-label").innerText = `I see: ${bestClass} (${(highestProb*100).toFixed(0)}%)`;
+            }
+            lastMove = bestClass;
+        }
+
+        // --- GAME LOGIC ---
+
+        function startGameLogic() {
+            const statusLabel = document.getElementById("status-label");
+            const resultLabel = document.getElementById("game-result");
+            
+            setInterval(() => {
+                gameState = "COUNTDOWN";
+                resultLabel.innerText = "";
+                
+                let count = 3;
+                statusLabel.innerText = "Get Ready...";
+                
+                const countTimer = setInterval(() => {
+                    if(count === 3) statusLabel.innerText = "Rock...";
+                    if(count === 2) statusLabel.innerText = "Paper...";
+                    if(count === 1) statusLabel.innerText = "Scissors...";
+                    count--;
+
+                    if (count < 0) {
+                        clearInterval(countTimer);
+                        gameState = "RESULT";
+                        determineWinner();
+                        setTimeout(() => { gameState = "IDLE"; }, 2000);
+                    }
+                }, 800);
+
+            }, 6000);
+        }
+
+        function determineWinner() {
+            const statusLabel = document.getElementById("status-label");
+            const resultLabel = document.getElementById("game-result");
+            
+            const computerOptions = ["Rock", "Paper", "Scissors"];
+            const computerMove = computerOptions[Math.floor(Math.random() * 3)];
+            const userMove = lastMove;
+
+            statusLabel.innerText = `You: ${userMove}  vs  Bot: ${computerMove}`;
+
+            if (userMove === "Nothing" || userMove === "Background") {
+                resultLabel.innerText = "❓ No Move Detected";
+                resultLabel.style.color = "#aaa";
+                return;
+            }
+
+            let result = "";
+            
+            if (userMove === computerMove) {
+                result = "It's a Tie!";
+                resultLabel.style.color = "#ffeb3b"; 
+            } else if (
+                (userMove === "Rock" && computerMove === "Scissors") ||
+                (userMove === "Paper" && computerMove === "Rock") ||
+                (userMove === "Scissors" && computerMove === "Paper")
+            ) {
+                result = "You Win! 🎉";
+                resultLabel.style.color = "#00ffcc"; 
+                scores.player++;
+            } else {
+                result = "Bot Wins! 🤖";
+                resultLabel.style.color = "#ff5555"; 
+                scores.bot++;
+            }
+
+            resultLabel.innerText = result;
+            updateScoreboard();
+        }
+
+        function updateScoreboard() {
+            document.getElementById("player-score").innerText = `Player: ${scores.player}`;
+            document.getElementById("bot-score").innerText = `Bot: ${scores.bot}`;
+        }
+    </script>
+</body>
+</html>
