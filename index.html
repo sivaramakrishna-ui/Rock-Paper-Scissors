@@ -38,7 +38,7 @@
             background: #555;
             color: white;
             font-size: 16px;
-            max-width: 150px; /* Limit width for mobile */
+            max-width: 150px;
         }
 
         button {
@@ -59,7 +59,7 @@
             padding: 10px 15px;
             background: #ff00cc;
             color: white;
-            display: none; /* Hidden by default */
+            display: none;
         }
 
         /* Game Area */
@@ -74,18 +74,15 @@
             background: #000;
         }
 
-        /* CRITICAL FIX: 
-           We use opacity:0 instead of display:none. 
-           Some browsers (like Safari on iOS) stop updating the video frame 
-           if the element is set to display:none, causing a blank canvas.
+        /* FIX: We move the video OFF-SCREEN instead of making it invisible.
+           Browsers pause invisible videos. Moving it off-screen keeps it running.
         */
         #webcam-video { 
             position: absolute; 
-            opacity: 0; 
-            width: 1px; 
-            height: 1px; 
-            pointer-events: none; 
-            z-index: -1;
+            left: -9999px;
+            top: 0;
+            width: 640px; 
+            height: 480px; 
         }
         
         #prediction-canvas { width: 100%; height: 100%; object-fit: cover; }
@@ -120,7 +117,7 @@
         <canvas id="prediction-canvas" width="224" height="224"></canvas>
     </div>
 
-    <!-- Video element is now hidden via CSS opacity, not display:none -->
+    <!-- Video element hidden off-screen -->
     <video id="webcam-video" playsinline autoplay muted></video>
 
     <div id="status-label">Waiting to start...</div>
@@ -131,7 +128,6 @@
         <span id="bot-score">Bot: 0</span>
     </div>
 
-    <!-- Import TensorFlow.js and Teachable Machine -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
 
@@ -142,58 +138,57 @@
         let model, maxPredictions;
         let videoElement, canvas, ctx;
         let currentStream = null;
-        let isGameRunning = false;
-        let scores = { player: 0, bot: 0 };
-        
-        // Game State Variables
-        let gameState = "IDLE"; // IDLE, COUNTDOWN, RESULT
+        let gameState = "IDLE";
         let lastMove = "Nothing";
+        let scores = { player: 0, bot: 0 };
 
         async function init() {
             const startBtn = document.getElementById("startBtn");
             startBtn.innerText = "Loading...";
             startBtn.disabled = true;
 
-            // SECURITY CHECK: Warn user if opening via file://
+            // Warn for file:// protocol
             if (window.location.protocol === 'file:') {
-                alert("⚠️ CAMERA ERROR LIKELY: You are opening this file directly (file://). Browsers block camera access here. \n\nPlease run this using a local server (like VS Code 'Live Server') or upload it to a secure website (https).");
+                alert("⚠️ PLEASE RUN ON LOCALHOST OR HTTPS. Cameras are blocked on file://");
             }
 
             try {
-                // 1. Load the Model
+                // 1. Setup DOM Elements
+                videoElement = document.getElementById("webcam-video");
+                canvas = document.getElementById("prediction-canvas");
+                ctx = canvas.getContext("2d");
+
+                // Draw loading text
+                ctx.fillStyle = "#333";
+                ctx.fillRect(0,0,224,224);
+                ctx.fillStyle = "#fff";
+                ctx.font = "20px Arial";
+                ctx.fillText("Loading Model...", 40, 110);
+
+                // 2. Load Model
                 const modelURL = URL + "model.json";
                 const metadataURL = URL + "metadata.json";
                 model = await tmImage.load(modelURL, metadataURL);
                 maxPredictions = model.getTotalClasses();
 
-                // 2. Setup DOM Elements
-                videoElement = document.getElementById("webcam-video");
-                canvas = document.getElementById("prediction-canvas");
-                ctx = canvas.getContext("2d");
+                ctx.fillText("Starting Cam...", 40, 140);
 
-                // 3. Request initial camera permission
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                    stream.getTracks().forEach(track => track.stop()); 
-                } catch (e) {
-                    console.log("Permission check failed", e);
-                }
-
-                // 4. Initialize Cameras
+                // 3. Permission & Setup
                 await getCameras();
                 
-                // 5. Start the first camera
+                // 4. Start Camera
                 const cameraSelect = document.getElementById("cameraSelect");
                 if (cameraSelect.options.length > 0) {
                     await startCamera(cameraSelect.value);
                 } else {
-                    alert("No cameras found! Ensure permission is granted.");
+                    // Try generic if listing failed
+                    await startCamera(); 
                 }
 
-                // 6. Start Loop
+                // 5. Start Loop
                 requestAnimationFrame(loop);
                 
-                // 7. UI Updates
+                // 6. UI
                 document.getElementById("status-label").innerText = "Make a move!";
                 startBtn.style.display = "none";
                 document.getElementById("cameraSelect").disabled = false;
@@ -207,10 +202,12 @@
             }
         }
 
-        // --- CAMERA HANDLING ---
-
         async function getCameras() {
             try {
+                // Request permission first to get labels
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                stream.getTracks().forEach(track => track.stop());
+
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
                 const select = document.getElementById("cameraSelect");
@@ -229,88 +226,62 @@
                     switchBtn.style.display = "inline-block";
                 }
 
-                select.onchange = () => {
-                    startCamera(select.value);
-                };
+                select.onchange = () => startCamera(select.value);
+
             } catch (err) {
-                console.warn("Could not list cameras", err);
+                console.warn("Camera listing failed", err);
             }
         }
 
         async function toggleCamera() {
             const select = document.getElementById("cameraSelect");
-            if (select.options.length < 2) return; 
-
-            const nextIndex = (select.selectedIndex + 1) % select.options.length;
-            select.selectedIndex = nextIndex;
+            if (select.options.length < 2) return;
+            select.selectedIndex = (select.selectedIndex + 1) % select.options.length;
             await startCamera(select.value);
         }
 
         async function startCamera(deviceId) {
-            // Stop current stream
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            // ATTEMPT 1: High quality preference
-            const constraintsDQ = {
-                video: {
-                    deviceId: { exact: deviceId },
-                    width: { ideal: 640 },
-                    height: { ideal: 480 }
-                }
-            };
+            // Constraints: Fallback to generic if deviceId fails
+            const constraints = deviceId 
+                ? { video: { deviceId: { exact: deviceId } } } 
+                : { video: true };
 
             try {
-                await tryGetUserMedia(constraintsDQ);
-            } catch (err) {
-                console.warn("High quality constraints failed, trying fallback...", err);
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                currentStream = stream;
+                videoElement.srcObject = stream;
                 
-                // ATTEMPT 2: Fallback (Just get ANY video from this device)
-                const constraintsFallback = {
-                    video: { deviceId: { exact: deviceId } }
-                };
+                // FIX: Force attributes for mobile
+                videoElement.setAttribute("playsinline", true);
+                videoElement.setAttribute("autoplay", true);
+                videoElement.setAttribute("muted", true);
 
-                try {
-                    await tryGetUserMedia(constraintsFallback);
-                } catch (err2) {
-                    console.error("Camera failed:", err2);
-                    alert(`Couldn't access camera. Error: ${err2.name}. \nCheck permissions and ensure you are on HTTPS.`);
-                }
+                // FIX: Explicit play promise
+                await videoElement.play();
+
+            } catch (err) {
+                console.error("Camera start failed", err);
+                alert("Camera failed to start: " + err.name);
             }
         }
 
-        async function tryGetUserMedia(constraints) {
-            const stream = await navigator.mediaDevices.getUserMedia(constraints);
-            currentStream = stream;
-            videoElement.srcObject = stream;
-            
-            // CRITICAL FIX: Explicitly play the video. 
-            // Browsers often require this even if 'autoplay' is in HTML.
-            await videoElement.play(); 
-
-            return new Promise((resolve) => {
-                videoElement.onloadedmetadata = () => {
-                    resolve();
-                };
-            });
-        }
-
-        // --- MAIN LOOP ---
-
         async function loop() {
-            // Only draw if we have enough data AND video dimensions are valid
-            if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) {
+            // Check if video is actually playing
+            if (videoElement.readyState >= 2) {
                 const videoSize = Math.min(videoElement.videoWidth, videoElement.videoHeight);
                 const startX = (videoElement.videoWidth - videoSize) / 2;
                 const startY = (videoElement.videoHeight - videoSize) / 2;
 
                 ctx.save();
                 ctx.translate(canvas.width, 0);
-                ctx.scale(-1, 1); 
+                ctx.scale(-1, 1);
                 ctx.drawImage(
                     videoElement,
-                    startX, startY, videoSize, videoSize, 
+                    startX, startY, videoSize, videoSize,
                     0, 0, canvas.width, canvas.height
                 );
                 ctx.restore();
@@ -326,21 +297,18 @@
             
             let highestProb = 0;
             let bestClass = "";
-
             for (let i = 0; i < maxPredictions; i++) {
                 if (prediction[i].probability > highestProb) {
                     highestProb = prediction[i].probability;
                     bestClass = prediction[i].className;
                 }
             }
-
+            
             if (gameState === "IDLE") {
                 document.getElementById("status-label").innerText = `I see: ${bestClass} (${(highestProb*100).toFixed(0)}%)`;
             }
             lastMove = bestClass;
         }
-
-        // --- GAME LOGIC ---
 
         function startGameLogic() {
             const statusLabel = document.getElementById("status-label");
@@ -349,7 +317,6 @@
             setInterval(() => {
                 gameState = "COUNTDOWN";
                 resultLabel.innerText = "";
-                
                 let count = 3;
                 statusLabel.innerText = "Get Ready...";
                 
@@ -366,19 +333,16 @@
                         setTimeout(() => { gameState = "IDLE"; }, 2000);
                     }
                 }, 800);
-
             }, 6000);
         }
 
         function determineWinner() {
-            const statusLabel = document.getElementById("status-label");
             const resultLabel = document.getElementById("game-result");
-            
             const computerOptions = ["Rock", "Paper", "Scissors"];
             const computerMove = computerOptions[Math.floor(Math.random() * 3)];
             const userMove = lastMove;
 
-            statusLabel.innerText = `You: ${userMove}  vs  Bot: ${computerMove}`;
+            document.getElementById("status-label").innerText = `You: ${userMove}  vs  Bot: ${computerMove}`;
 
             if (userMove === "Nothing" || userMove === "Background") {
                 resultLabel.innerText = "❓ No Move Detected";
@@ -387,29 +351,23 @@
             }
 
             let result = "";
-            
             if (userMove === computerMove) {
                 result = "It's a Tie!";
-                resultLabel.style.color = "#ffeb3b"; 
+                resultLabel.style.color = "#ffeb3b";
             } else if (
                 (userMove === "Rock" && computerMove === "Scissors") ||
                 (userMove === "Paper" && computerMove === "Rock") ||
                 (userMove === "Scissors" && computerMove === "Paper")
             ) {
                 result = "You Win! 🎉";
-                resultLabel.style.color = "#00ffcc"; 
+                resultLabel.style.color = "#00ffcc";
                 scores.player++;
             } else {
                 result = "Bot Wins! 🤖";
-                resultLabel.style.color = "#ff5555"; 
+                resultLabel.style.color = "#ff5555";
                 scores.bot++;
             }
-
             resultLabel.innerText = result;
-            updateScoreboard();
-        }
-
-        function updateScoreboard() {
             document.getElementById("player-score").innerText = `Player: ${scores.player}`;
             document.getElementById("bot-score").innerText = `Bot: ${scores.bot}`;
         }
