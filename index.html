@@ -19,7 +19,6 @@
 
         h1 { margin-top: 20px; color: #00ffcc; text-shadow: 0 0 10px rgba(0,255,204,0.5); }
 
-        /* Controls Area */
         .controls {
             margin: 15px 0;
             background: #333;
@@ -62,7 +61,6 @@
             display: none;
         }
 
-        /* Game Area */
         #canvas-wrapper {
             position: relative;
             margin: 20px auto;
@@ -74,9 +72,7 @@
             background: #000;
         }
 
-        /* FIX: We move the video OFF-SCREEN instead of making it invisible.
-           Browsers pause invisible videos. Moving it off-screen keeps it running.
-        */
+        /* Video hidden off-screen to keep it running */
         #webcam-video { 
             position: absolute; 
             left: -9999px;
@@ -87,7 +83,6 @@
         
         #prediction-canvas { width: 100%; height: 100%; object-fit: cover; }
 
-        /* UI Text */
         #status-label { font-size: 24px; font-weight: bold; margin: 10px 0; min-height: 30px; }
         #game-result { font-size: 28px; font-weight: bold; color: #ffeb3b; margin-top: 10px; min-height: 40px; }
         
@@ -99,6 +94,15 @@
             background: #222;
             padding: 10px 30px;
             border-radius: 20px;
+        }
+        
+        .error-msg {
+            color: #ff5555;
+            background: rgba(255,0,0,0.1);
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px;
+            display: none;
         }
     </style>
 </head>
@@ -113,14 +117,16 @@
         <button id="startBtn" onclick="init()">Start Game</button>
     </div>
 
+    <!-- Error Message Display -->
+    <div id="error-display" class="error-msg"></div>
+
     <div id="canvas-wrapper">
         <canvas id="prediction-canvas" width="224" height="224"></canvas>
     </div>
 
-    <!-- Video element hidden off-screen -->
     <video id="webcam-video" playsinline autoplay muted></video>
 
-    <div id="status-label">Waiting to start...</div>
+    <div id="status-label">Click 'Start Game' to begin</div>
     <div id="game-result"></div>
 
     <div class="score-board">
@@ -132,8 +138,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
 
     <script>
-        // --- CONFIGURATION: REPLACE THIS WITH YOUR MODEL URL ---
+        // -----------------------------------------------------------------
+        // 👇 PASTE YOUR URL BELOW (Keep the quotes!)
         const URL = "https://teachablemachine.withgoogle.com/models/Z56Hobds2/";
+        // -----------------------------------------------------------------
 
         let model, maxPredictions;
         let videoElement, canvas, ctx;
@@ -144,67 +152,88 @@
 
         async function init() {
             const startBtn = document.getElementById("startBtn");
-            startBtn.innerText = "Loading...";
+            const statusLabel = document.getElementById("status-label");
+            const errorDisplay = document.getElementById("error-display");
+            
+            errorDisplay.style.display = "none";
             startBtn.disabled = true;
 
-            // Warn for file:// protocol
+            // 1. URL Check
+            if (URL.includes("YOUR_MODEL_ID_HERE")) {
+                showError("⚠️ You forgot to paste your Model URL in the code!");
+                startBtn.innerText = "Fix URL";
+                startBtn.disabled = false;
+                return;
+            }
+
+            // 2. Protocol Check
             if (window.location.protocol === 'file:') {
-                alert("⚠️ PLEASE RUN ON LOCALHOST OR HTTPS. Cameras are blocked on file://");
+                showError("⚠️ blocked by browser. Please use HTTPS or Localhost.");
             }
 
             try {
-                // 1. Setup DOM Elements
+                // Setup Canvas
                 videoElement = document.getElementById("webcam-video");
                 canvas = document.getElementById("prediction-canvas");
                 ctx = canvas.getContext("2d");
-
-                // Draw loading text
-                ctx.fillStyle = "#333";
+                
+                // Draw "Loading" on canvas
+                ctx.fillStyle = "#222";
                 ctx.fillRect(0,0,224,224);
                 ctx.fillStyle = "#fff";
-                ctx.font = "20px Arial";
-                ctx.fillText("Loading Model...", 40, 110);
+                ctx.font = "16px Arial";
+                ctx.fillText("Initializing...", 60, 110);
 
-                // 2. Load Model
-                const modelURL = URL + "model.json";
-                const metadataURL = URL + "metadata.json";
-                model = await tmImage.load(modelURL, metadataURL);
-                maxPredictions = model.getTotalClasses();
-
-                ctx.fillText("Starting Cam...", 40, 140);
-
-                // 3. Permission & Setup
+                // 3. Start Camera FIRST (to prevent browser timeout)
+                statusLabel.innerText = "Opening Camera...";
                 await getCameras();
                 
-                // 4. Start Camera
                 const cameraSelect = document.getElementById("cameraSelect");
                 if (cameraSelect.options.length > 0) {
                     await startCamera(cameraSelect.value);
                 } else {
-                    // Try generic if listing failed
-                    await startCamera(); 
+                    await startCamera(); // Try generic
                 }
-
-                // 5. Start Loop
-                requestAnimationFrame(loop);
                 
-                // 6. UI
-                document.getElementById("status-label").innerText = "Make a move!";
+                // 4. Load Model
+                statusLabel.innerText = "Downloading AI Model...";
+                startBtn.innerText = "Downloading...";
+                
+                const modelURL = URL + "model.json";
+                const metadataURL = URL + "metadata.json";
+                
+                // Load model with timeout check logic if needed (handled by catch)
+                model = await tmImage.load(modelURL, metadataURL);
+                maxPredictions = model.getTotalClasses();
+
+                // 5. Success!
+                statusLabel.innerText = "Make a move!";
                 startBtn.style.display = "none";
                 document.getElementById("cameraSelect").disabled = false;
                 
+                // Start Loop
+                requestAnimationFrame(loop);
                 startGameLogic();
 
             } catch (error) {
                 console.error(error);
-                alert("Error: " + error.message);
-                startBtn.innerText = "Error";
+                let msg = error.message;
+                if (msg.includes("404")) msg = "Model URL not found (404). Did you copy it correctly?";
+                showError("Error: " + msg);
+                startBtn.innerText = "Retry";
+                startBtn.disabled = false;
+                statusLabel.innerText = "Setup Failed";
             }
+        }
+
+        function showError(msg) {
+            const el = document.getElementById("error-display");
+            el.innerText = msg;
+            el.style.display = "block";
         }
 
         async function getCameras() {
             try {
-                // Request permission first to get labels
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 stream.getTracks().forEach(track => track.stop());
 
@@ -245,7 +274,6 @@
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            // Constraints: Fallback to generic if deviceId fails
             const constraints = deviceId 
                 ? { video: { deviceId: { exact: deviceId } } } 
                 : { video: true };
@@ -255,22 +283,17 @@
                 currentStream = stream;
                 videoElement.srcObject = stream;
                 
-                // FIX: Force attributes for mobile
                 videoElement.setAttribute("playsinline", true);
                 videoElement.setAttribute("autoplay", true);
                 videoElement.setAttribute("muted", true);
-
-                // FIX: Explicit play promise
                 await videoElement.play();
 
             } catch (err) {
-                console.error("Camera start failed", err);
-                alert("Camera failed to start: " + err.name);
+                throw new Error("Camera blocked or missing. " + err.name);
             }
         }
 
         async function loop() {
-            // Check if video is actually playing
             if (videoElement.readyState >= 2) {
                 const videoSize = Math.min(videoElement.videoWidth, videoElement.videoHeight);
                 const startX = (videoElement.videoWidth - videoSize) / 2;
@@ -318,15 +341,12 @@
                 gameState = "COUNTDOWN";
                 resultLabel.innerText = "";
                 let count = 3;
-                statusLabel.innerText = "Get Ready...";
                 
                 const countTimer = setInterval(() => {
-                    if(count === 3) statusLabel.innerText = "Rock...";
-                    if(count === 2) statusLabel.innerText = "Paper...";
-                    if(count === 1) statusLabel.innerText = "Scissors...";
+                    statusLabel.innerText = count > 0 ? count + "..." : "SHOOT!";
                     count--;
 
-                    if (count < 0) {
+                    if (count < -1) {
                         clearInterval(countTimer);
                         gameState = "RESULT";
                         determineWinner();
