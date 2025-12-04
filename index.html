@@ -74,8 +74,20 @@
             background: #000;
         }
 
-        /* We hide the raw video and only show the cropped canvas */
-        #webcam-video { display: none; }
+        /* CRITICAL FIX: 
+           We use opacity:0 instead of display:none. 
+           Some browsers (like Safari on iOS) stop updating the video frame 
+           if the element is set to display:none, causing a blank canvas.
+        */
+        #webcam-video { 
+            position: absolute; 
+            opacity: 0; 
+            width: 1px; 
+            height: 1px; 
+            pointer-events: none; 
+            z-index: -1;
+        }
+        
         #prediction-canvas { width: 100%; height: 100%; object-fit: cover; }
 
         /* UI Text */
@@ -108,7 +120,7 @@
         <canvas id="prediction-canvas" width="224" height="224"></canvas>
     </div>
 
-    <!-- Hidden video element for raw stream -->
+    <!-- Video element is now hidden via CSS opacity, not display:none -->
     <video id="webcam-video" playsinline autoplay muted></video>
 
     <div id="status-label">Waiting to start...</div>
@@ -255,7 +267,6 @@
                 console.warn("High quality constraints failed, trying fallback...", err);
                 
                 // ATTEMPT 2: Fallback (Just get ANY video from this device)
-                // This fixes the issue on phones that don't support 640x480 exactly
                 const constraintsFallback = {
                     video: { deviceId: { exact: deviceId } }
                 };
@@ -274,6 +285,10 @@
             currentStream = stream;
             videoElement.srcObject = stream;
             
+            // CRITICAL FIX: Explicitly play the video. 
+            // Browsers often require this even if 'autoplay' is in HTML.
+            await videoElement.play(); 
+
             return new Promise((resolve) => {
                 videoElement.onloadedmetadata = () => {
                     resolve();
@@ -284,7 +299,8 @@
         // --- MAIN LOOP ---
 
         async function loop() {
-            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+            // Only draw if we have enough data AND video dimensions are valid
+            if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) {
                 const videoSize = Math.min(videoElement.videoWidth, videoElement.videoHeight);
                 const startX = (videoElement.videoWidth - videoSize) / 2;
                 const startY = (videoElement.videoHeight - videoSize) / 2;
